@@ -1,8 +1,9 @@
 #!/bin/bash
-#   pacdiff : a simple pacnew/pacsave updater
+#   opkgdiff : a simple opkg changed conffiles updater
 #
 #   Copyright (c) 2007 Aaron Griffin <aaronmgriffin@gmail.com>
 #   Copyright (c) 2013-2016 Pacman Development Team <pacman-dev@archlinux.org>
+#   Copyright (c) 2024 Misaka13514 <Misaka13514@gmail.com>
 #
 #   This program is free software; you can redistribute it and/or modify
 #   it under the terms of the GNU General Public License as published by
@@ -20,10 +21,8 @@
 
 shopt -s extglob
 
-declare -r myname='pacdiff'
-declare -r myver='@PACKAGE_VERSION@'
-
-LIBRARY=${LIBRARY:-'@libmakepkgdir@'}
+declare -r myname='opkgdiff'
+declare -r myver='1.0'
 
 diffprog=${DIFFPROG:-'vim -d'}
 diffsearchpath=${DIFFSEARCHPATH:-/etc}
@@ -31,35 +30,57 @@ mergeprog=${MERGEPROG:-'diff3 -m'}
 cachedirs=()
 USE_COLOR='y'
 SUDO=''
-declare -a oldsaves
-declare -i USE_FIND=0 USE_LOCATE=0 USE_PACDB=0 OUTPUTONLY=0 BACKUP=0 THREE_WAY_DIFF=0
+declare -i USE_FIND=0 USE_LOCATE=0 USE_OPKGDB=0 OUTPUTONLY=0 BACKUP=0 THREE_WAY_DIFF=0
 
-# Import libmakepkg
-# shellcheck source=/dev/null
-source "$LIBRARY"/util/message.sh
+if ! type -t colorize &>/dev/null; then
+	RED='\033[0;31m'
+	GREEN='\033[0;32m'
+	YELLOW='\033[0;33m'
+	BLUE='\033[0;34m'
+	BOLD='\033[1m'
+	ALL_OFF='\033[0m'
+fi
 
 die() {
 	error "$@"
 	exit 1
 }
 
+if ! type -t msg &>/dev/null; then
+	msg() {
+		printf "${GREEN}${BOLD}==>${ALL_OFF} ${BOLD}$1${ALL_OFF}\n" "${@:2}"
+	}
+fi
+
+if ! type -t msg2 &>/dev/null; then
+	msg2() {
+		printf "${BLUE}${BOLD}  ->${ALL_OFF} ${BOLD}$1${ALL_OFF}\n" "${@:2}"
+	}
+fi
+
+if ! type -t ask &>/dev/null; then
+	ask() {
+		printf "${BLUE}${BOLD}::${ALL_OFF} ${BOLD}$1${ALL_OFF}" "${@:2}"
+	}
+fi
+
 usage() {
 	cat <<EOF
 ${myname} v${myver}
 
-pacorig, pacnew and pacsave maintenance utility.
+opkg changed conffiles maintenance utility.
 
 Usage: $myname [options]
 
-Search Options:   select one (default: --pacmandb)
+Search Options:   select one (default: --opkgdb)
   -f, --find      scan using find
   -l, --locate    scan using locate
-  -p, --pacmandb  scan active config files from pacman database
+  -p, --opkgdb    scan active config files from opkg database
 
 General Options:
   -b, --backup          when overwriting, save old files with .bak
   -c, --cachedir <dir>  scan "dir" for 3-way merge base candidates
-                        (default: read from @sysconfdir@/pacman.conf)
+                        (default: read from @sysconfdir@/opkg.conf)
       --nocolor         do not colorize output
   -o, --output          print files instead of merging them
   -s, --sudo            use sudo and sudoedit to merge/remove files
@@ -82,19 +103,15 @@ version() {
 	printf "%s %s\n" "$myname" "$myver"
 	echo 'Copyright (C) 2007 Aaron Griffin <aaronmgriffin@gmail.com>'
 	echo 'Copyright (C) 2013-2016 Pacman Development Team <pacman-dev@archlinux.org>'
+	echo 'Copyright (C) 2024 Misaka13514 <Misaka13514@gmail.com>'
 }
 
 print_existing() {
 	[[ -f "$1" ]] && printf '%s\0' "$1"
 }
 
-print_existing_pacsave(){
-	for f in "${1}"?(.+([0-9])); do
-		[[ -f $f ]] && printf '%s\0' "$f"
-	done
-}
-
 base_cache_tar() {
+	# TODO
 	package="$1"
 
 	for cachedir in "${cachedirs[@]}"; do
@@ -104,7 +121,7 @@ base_cache_tar() {
 		}
 
 		find "$PWD" -name "$package-[0-9]*.pkg.tar*" ! -name '*.sig' |
-			pacsort --files --reverse | sed -ne '2p'
+			# pacsort --files --reverse | sed -ne '2p'
 
 		popd &>/dev/null || exit
 	done
@@ -119,18 +136,18 @@ diffprog_fn() {
 }
 
 view_diff() {
-	pacfile="$1"
+	opkgfile="$1"
 	file="$2"
 
-	package="$(pacman -Qoq "$file")" || return 1
-	base_tar="$(base_cache_tar "$package")"
+	package="$(opkg search "$file" | cut -d' ' -f1)" || return 1
+	# base_tar="$(base_cache_tar "$package")"
 
 	two_way_diff() {
-		diffprog_fn "$pacfile" "$file"
+		diffprog_fn "$opkgfile" "$file"
 	}
 
 	three_way_diff() {
-		diffprog_fn "$pacfile" "$base" "$file"
+		diffprog_fn "$opkgfile" "$base" "$file"
 	}
 
 	unset tempdir
@@ -142,7 +159,7 @@ view_diff() {
 		two_way_diff
 	else
 		basename="$(basename "$file")"
-		tempdir="$(mktemp -d --tmpdir "pacdiff-diff-$basename.XXX")"
+		tempdir="$(mktemp -d --tmpdir "$myname-diff-$basename.XXX")"
 		base="$(mktemp "$tempdir"/"$basename.base.XXX")"
 		merged="$(mktemp "$tempdir"/"$basename.merged.XXX")"
 
@@ -156,9 +173,9 @@ view_diff() {
 
 	ret=1
 
-	if cmp -s "$pacfile" "$file"; then
+	if cmp -s "$opkgfile" "$file"; then
 		msg2 "Files are identical, removing..."
-		$SUDO rm -v "$pacfile"
+		$SUDO rm -v "$opkgfile"
 		ret=0
 	fi
 
@@ -167,11 +184,11 @@ view_diff() {
 }
 
 merge_file() {
-	pacfile="$1"
+	opkgfile="$1"
 	file="$2"
 
-	package="$(pacman -Qoq "$file")" || return 1
-	base_tar="$(base_cache_tar "$package")"
+	package="$(opkg search "$file" | cut -d' ' -f1)" || return 1
+	# base_tar="$(base_cache_tar "$package")"
 
 	if [[ -z $base_tar ]]; then
 		msg2 "Unable to find a base package."
@@ -179,7 +196,7 @@ merge_file() {
 	fi
 
 	basename="$(basename "$file")"
-	tempdir="$(mktemp -d --tmpdir "pacdiff-merge-$basename.XXX")"
+	tempdir="$(mktemp -d --tmpdir "$myname-merge-$basename.XXX")"
 	base="$(mktemp "$tempdir"/"$basename.base.XXX")"
 	merged="$(mktemp "$tempdir"/"$basename.merged.XXX")"
 
@@ -188,7 +205,7 @@ merge_file() {
 		return 1
 	fi
 
-	if $mergeprog "$file" "$base" "$pacfile" >"$merged"; then
+	if $mergeprog "$file" "$base" "$opkgfile" >"$merged"; then
 		msg2 "Merged without conflicts."
 	fi
 
@@ -209,7 +226,7 @@ merge_file() {
 		warning "Unable to write merged file to %s. Merged file is preserved at %s" "$file" "$merged"
 		return 1
 	fi
-	$SUDO rm -rv "$pacfile" "$tempdir"
+	$SUDO rm -rv "$opkgfile" "$tempdir"
 	return 0
 }
 
@@ -217,24 +234,17 @@ cmd() {
 	if (( USE_LOCATE )); then
 		# plocate searches for files that match all patterns whereas mlocate searches for files that match one or more patterns
 		if type -p plocate >/dev/null; then
-			for p in \*.pacnew \*.pacorig \*.pacsave '*.pacsave.[0-9]*'; do
+			for p in \*-opkg; do
 				locate -0 -e -b "$p"
 			done
 		else
-			locate -0 -e -b \*.pacnew \*.pacorig \*.pacsave '*.pacsave.[0-9]*'
+			locate -0 -e -b \*-opkg
 		fi
 	elif (( USE_FIND )); then
-		find "$diffsearchpath" \( -name \*.pacnew -o -name \*.pacorig -o -name \*.pacsave -o -name '*.pacsave.[0-9]*' \) -print0
-	elif (( USE_PACDB )); then
-		awk '/^%BACKUP%$/ {
-		while (getline) {
-			if (/^$/) { nextfile }
-			print $1
-		}
-		}' "${pac_db}"/*/files | while read -r bkup; do
-			print_existing "/$bkup.pacnew"
-			print_existing "/$bkup.pacorig"
-			print_existing_pacsave "/$bkup.pacsave"
+		find "$diffsearchpath" -name \*-opkg -print0
+	elif (( USE_OPKGDB )); then
+		opkg list-changed-conffiles | while read -r bkup; do
+			print_existing "$bkup-opkg"
 		done
 	fi
 }
@@ -245,8 +255,8 @@ while [[ -n "$1" ]]; do
 			USE_FIND=1;;
 		-l|--locate)
 			USE_LOCATE=1;;
-		-p|--pacmandb)
-			USE_PACDB=1;;
+		-p|--opkgdb)
+			USE_OPKGDB=1;;
 		-b|--backup)
 			BACKUP=1;;
 		-c|--cachedir)
@@ -271,7 +281,9 @@ done
 
 # check if messages are to be printed using color
 if [[ -t 2 && $USE_COLOR != "n" ]]; then
-	colorize
+	if type -t colorize &>/dev/null; then
+		colorize
+	fi
 else
 	unset ALL_OFF BOLD BLUE GREEN RED YELLOW
 fi
@@ -284,73 +296,56 @@ if ! type -p "${mergeprog%% *}" >/dev/null && (( ! OUTPUTONLY )); then
 	die "Cannot find the $mergeprog binary required for merging differences."
 fi
 
-case $(( USE_FIND + USE_LOCATE + USE_PACDB )) in
-	0) USE_PACDB=1;; # set the default search option
+case $(( USE_FIND + USE_LOCATE + USE_OPKGDB )) in
+	0) USE_OPKGDB=1;; # set the default search option
 	[^1]) error "Only one search option may be used at a time"
 	 	usage; exit 1;;
 esac
 
-if (( USE_PACDB )); then
-	if ! DBPath="$(pacman-conf DBPath)"; then
-		error "unable to read @sysconfdir@/pacman.conf"
-		usage; exit 1
-	fi
-	pac_db="${DBPath:-@localstatedir@/lib/pacman}/local"
-	if [[ ! -d "${pac_db}" ]]; then
-		error "unable to read pacman database %s". "${pac_db}"
-		usage; exit 1
-	fi
-fi
-
-if [[ -z ${cachedirs[*]} ]]; then
-	readarray -t cachedirs < <(pacman-conf CacheDir)
-fi
+# if [[ -z ${cachedirs[*]} ]]; then
+# 	# TODO
+# 	readarray -t cachedirs < <(pacman-conf CacheDir)
+# fi
 
 # see https://mywiki.wooledge.org/BashFAQ/020
-while IFS= read -u 3 -r -d '' pacfile; do
-	file="${pacfile%.pac*}"
-	file_type="pac${pacfile##*.pac}"
+while IFS= read -u 3 -r -d '' opkgfile; do
+	file="${opkgfile%-opkg}"
+	file_type="opkg"
 
 	if (( OUTPUTONLY )); then
-		echo "$pacfile"
-		continue
-	fi
-
-	# add matches for pacsave.N to oldsaves array, do not prompt
-	if [[ $file_type = pacsave.+([0-9]) ]]; then
-		oldsaves+=("$pacfile")
+		echo "$opkgfile"
 		continue
 	fi
 
 	msg "%s file found for %s" "$file_type" "$file"
 	if [ ! -f "$file" ]; then
 		warning "$file does not exist"
-		$SUDO rm -iv "$pacfile"
+		$SUDO rm -iv "$opkgfile"
 		continue
 	fi
 
-	if cmp -s "$pacfile" "$file"; then
+	if cmp -s "$opkgfile" "$file"; then
 		msg2 "Files are identical, removing..."
-		$SUDO rm -v "$pacfile"
+		$SUDO rm -v "$opkgfile"
 	else
 		while :; do
 			ask "(V)iew, (M)erge, (S)kip, (R)emove %s, (O)verwrite with %s, (Q)uit: [v/m/s/r/o/q] " "$file_type" "$file_type"
 			read -r c || break
 			case $c in
 				q|Q) exit 0;;
-				r|R) $SUDO rm -v "$pacfile"; break ;;
+				r|R) $SUDO rm -v "$opkgfile"; break ;;
 				o|O)
 					if (( BACKUP )); then
 						$SUDO cp -v "$file" "$file.bak"
 					fi
-					$SUDO mv -v "$pacfile" "$file"
+					$SUDO mv -v "$opkgfile" "$file"
 					break ;;
 				v|V)
-					if view_diff "$pacfile" "$file"; then
+					if view_diff "$opkgfile" "$file"; then
 						break
 					fi ;;
 				m|M)
-					if merge_file "$pacfile" "$file"; then
+					if merge_file "$opkgfile" "$file"; then
 						break
 					fi ;;
 				s|S) break ;;
@@ -359,7 +354,5 @@ while IFS= read -u 3 -r -d '' pacfile; do
 		done
 	fi
 done 3< <(cmd)
-
-(( ${#oldsaves[@]} )) && warning "Ignoring %s" "${oldsaves[@]}"
 
 exit 0
